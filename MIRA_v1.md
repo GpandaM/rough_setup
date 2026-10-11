@@ -223,6 +223,8 @@ MIRA replays the same frozen tasks through an application using a baseline model
 
 Swapping a model also swaps its provider adapter (for example `ChatOpenAI` to `ChatAnthropic`), which differs in tool binding, role formatting, and retries. MIRA therefore evaluates the integration bundle (model + provider adapter), not a pure model effect. The adapter package and version are logged on every run, and the adapter-isolation check (Section 3.5) measures the adapter's share.
 
+**Default choice (Assumption).** Most candidate models are hosted on the same cloud and platform as the baseline (for example Azure Foundry or GCP Vertex). In that case the preferred mode is `config-seam`: change the model or deployment name and keep the same endpoint. `gateway-route` is the exception, used only when the candidate is on a different provider or the app has no other seam. This avoids adding the gateway's translation layer to the unit under test.
+
 ### 2.4 Axis B: fidelity level (what MIRA can observe)
 
 | Level | Mechanism | Sees agents | Sees tool decisions and arguments | Sees tool results | Sees LLM calls |
@@ -486,12 +488,45 @@ Arguments are stored verbatim. Each call is validated against the tool schema fr
 
 *Caption: One run is a tree. The router's decision appears as an LLM call, handoffs show routing, and each tool call carries its verbatim arguments and a schema check. The invalid date and its retry are visible even though the final answer is correct.*
 
+### 4.5b Worked example: LangGraph trace to canonical form
+
+LangGraph does not store traces by itself. Its callbacks emit events in memory, and a sink must receive them: LangSmith (when tracing is switched on), an OTel exporter, or a MIRA callback handler. The graph checkpointer (for example PostgreSQL) stores graph state, not a trace, so it is a weak source (Assumption). In replay, MIRA attaches its own callback handler and receives these events directly.
+
+### Diagram 7b: LangGraph events mapped to canonical spans
+
+```text
+ RAW LANGGRAPH EVENTS (run_id <- parent_run_id)        CANONICAL SPAN
+ chain_start  "graph"          a1 <- none           -> Root span
+ chain_start  "supervisor"     b2 <- a1             -> Agent: Supervisor (via mapping)
+ chat_model   gpt-4o           c3 <- b2             -> LLM call (tokens, cost, latency)
+   end: tool_call transfer_to_research               -> Handoff: Supervisor -> Research
+ chain_start  "research_node"  d4 <- a1             -> Agent: Research (via mapping)
+ tool_start   search_policy    e5 <- d4             -> Tool call (args verbatim)
+   input {"query":"claim 4471 coverage"}
+ tool_end     e5 output: 3 docs                      -> result stored by hash
+ retriever    policy_index     f6 <- d4             -> Retrieval span
+ chain_start  "analysis_node"  g7 <- a1             -> Agent: Analysis (via mapping)
+ tool_start   query_db         h8 <- g7             -> Tool call
+   input {"date":"03/04/2026"}  tool_error h8       -> schema: INVALID, error set
+ tool_start   query_db         i9 <- g7             -> Retry span, linked to h8
+   input {"date":"2026-04-03"}  tool_end i9         -> schema: valid
+ chain_start  "response_node"  j1 <- a1             -> Agent: Response (via mapping)
+
+ Rules applied by the normalizer:
+  parent_run_id           -> parent-child link
+  node name               -> agent via App Profile mapping (4.4, step 3)
+  tool error then same    -> retry span (inferred; LangGraph has no retry marker)
+   tool, same parent
+```
+
+*Caption: Each LangGraph callback event carries a run ID and a parent run ID, which rebuild the tree. The normalizer turns nodes into agents using the App Profile mapping and turns tool and model events into spans. A retry is inferred from a failed tool call followed by the same tool under the same parent.*
+
 ### 4.6 Payload policy
 
 | Concern | Policy |
 | --- | --- |
 | Sensitive data | Redaction at capture, before leaving the worker |
-| Large payloads | Stored in the object store, referenced by hash |
+| Large payloads | Stored in the object store (Section 12.2), referenced by hash |
 | Sampling | None. Every step of every evaluation run is kept. |
 | Raw vs canonical | Both kept (Diagram 6) |
 
@@ -991,7 +1026,7 @@ MIRA uses containers and a thin abstraction layer, so KIP and non-KIP apps and G
 | --- | --- | --- |
 | Compute | Container runtime | Docker Compose (v1), Kubernetes (v2), on KIP, GCP, or Azure |
 | Queue | Job queue (Assumption: Celery with Redis in v1) | Managed or self-hosted queue behind the same interface |
-| Storage | Relational store plus S3-compatible object store | PostgreSQL and MinIO, or the cloud's equivalents |
+| Storage | Relational store plus an object store behind one storage interface (put/get by hash) | PostgreSQL and MinIO (v1, runs anywhere), or Azure Blob Storage or Google Cloud Storage through the same interface |
 | Secrets | Secret store with short-lived credentials | Vault, or the platform's secret manager |
 | Identity | OIDC single sign-on and RBAC | Enterprise identity provider |
 | Model endpoints | Provider adapter layer and gateway | OpenAI/Azure OpenAI, Anthropic, Google, self-hosted |
