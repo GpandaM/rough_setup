@@ -521,6 +521,43 @@ LangGraph does not store traces by itself. Its callbacks emit events in memory, 
 
 *Caption: Each LangGraph callback event carries a run ID and a parent run ID, which rebuild the tree. The normalizer turns nodes into agents using the App Profile mapping and turns tool and model events into spans. A retry is inferred from a failed tool call followed by the same tool under the same parent.*
 
+### 4.5c Worked example: two real run records in canonical form
+
+The two records below are LangSmith-style run exports from a LangGraph app: the root run `a1` and the failed tool run `h8`. Only these two were supplied, so the normalizer sees a gap.
+
+### Diagram 7c: Raw run records to canonical spans
+
+```text
+ RAW FIELD (run a1, root)                 CANONICAL SPAN s1
+ id "a1", parent_run_id null              span_id s1, parent none, type root
+ name "graph", run_type chain             type agent-root (no agent name known)
+ start 17:45:00.000, end 17:45:05.200     latency 5.2 s
+ inputs.messages[0] HumanMessage          input "Check claim 4471 coverage ..."
+ outputs.messages[0] AIMessage            output "Based on the policy analysis..."
+ status success                           error none
+ extra.metadata.thread_id                 run correlation key (task T42, repeat 2)
+
+ RAW FIELD (run h8, tool)                 CANONICAL SPAN s8
+ id "h8", parent_run_id "g7"              parent s7 (record g7 NOT in the export)
+ name "query_db", run_type tool           type tool call, tool "query_db"
+ start 17:45:02.100, end 17:45:02.400     latency 0.3 s
+ inputs {"date":"03/04/2026"}             arguments {"date":"03/04/2026"} verbatim
+ status error                             error set
+ error "ValueError: INVALID ... YYYY-MM-DD" error text; schema check: INVALID
+ extra.metadata.langgraph_node            structural unit "analysis_node"
+   "analysis_node"                         -> agent Analysis (App Profile mapping)
+ outputs null                             result none
+
+ NORMALIZER FLAGS
+  gap: parent g7 missing -> s8 attached to root, marked "orphan"
+  gap: no later query_db span -> retry not observed in this export
+  coverage score lowered; cost and token fields "Not applicable" (no LLM span)
+```
+
+*Caption: The root run gives the whole request, its input, output, and 5.2 seconds of latency. The tool run gives the exact failed arguments and the node name, which the App Profile maps to the Analysis agent. Because the parent record `g7` and any retry are missing, the normalizer flags gaps instead of guessing.*
+
+**Reading note.** The date "03/04/2026" is ambiguous (3 April or 4 March). The tool schema requires `YYYY-MM-DD`, so MIRA records it as a schema violation and does not interpret it.
+
 ### 4.6 Payload policy
 
 | Concern | Policy |
